@@ -1,5 +1,6 @@
-#: hello_commands.py
 # -*- coding: utf-8 -*-
+# Copyright (C) 2018-2026 Connet Information Technology Company, Shanghai.
+
 from xSide import xside
 from qSide import QAction, QRoundMenu, Qt
 

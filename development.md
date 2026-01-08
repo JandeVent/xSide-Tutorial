@@ -85,7 +85,6 @@ pip install qSide xSide xSide-Window
 ```python
 #: hello.py
 # -*- coding: utf-8 -*-
-# Copyright (C) 2018-2026 Connet Information Technology Company, Shanghai.
 from xSide import xside
 
 class HelloWorld(object):
@@ -426,7 +425,7 @@ xside.window.addToolWindow(
 * 明确 Tool Window 在插件架构中的角色
 
 ---
-### 7. Hello Commands：引入命令系统
+## 7. Hello Commands：引入命令系统
 
 在前面的章节中，我们已经可以通过菜单和 Action 触发代码逻辑。
 但在插件化 IDE 中，“点击菜单 → 执行函数” 并不是一个可扩展至全局的模型。
@@ -640,3 +639,250 @@ Command 本身不管理 UI、不持有状态，而是：
 * Action → Command 的解耦模型
 * Command 与 Service 的协作关系
 * 为什么 Command 是插件系统的“胶水层”
+
+---
+# 第三部分：插件开发（高级）
+
+## 8. QPlugin：服务型插件的开发与使用（Hello Plugin）
+
+本章通过一个完整的 Notes 插件 + Host App 示例，讲解在 xSide 中：
+* 如何开发一个 QPlugin
+* 如何通过 Window Service 暴露 Tool Window
+* 如何在 Host App 中使用插件提供的能力
+* 插件、UI、Action 之间的正确分工方式
+
+示例目标,完成一个最小但完整的「便签系统」：
+* 一个 Notes 插件
+  * 作为服务存在
+  * 管理便签数据
+  * 提供 Tool Window
+* 一个 Hello Notes Host App
+  * 通过 Action 操作 Notes
+  * 不关心 Notes 的内部实现
+
+**1. 示例插件的职责定义**
+
+Notes 插件负责：
+* 管理便签数据（内存级）
+* 对外暴露便签相关能力（API）
+  * add(note)
+  * remove(id)
+  * currentId()
+* 广播便签变化事件（Signal）
+* 提供一个 Tool Window 用于展示便签
+
+Notes 插件不负责：
+* 菜单定义
+* Command 注册
+* 布局位置
+
+**2. 插件基本结构**
+
+```python
+class Notes(QPlugin):
+
+    noteAdded = Signal(str)
+    noteRemoved = Signal(str)
+
+    def __init__(self):
+        super().__init__(
+            name='notes',
+            version=Version('0.1.0a0'),
+            author='Connet Information Technology Company Ltd, Shanghai.',
+            title='Notes',
+            description='Simple notes service',
+        )
+        self._view = None
+        self._notes: Dict[str, str] = {}
+```
+
+**说明：**
+* name='notes' 是插件的**全局服务**ID
+* 插件内部维护自己的状态 `_notes`
+* UI 对象在 bootup() 之前不创建
+
+**3. 插件生命周期：bootup**
+
+```python
+def bootup(self):
+    self._view = NotesView()
+    self._view.setObjectName('notes-view')
+    xside.window.registerToolWindow(self._view)
+```
+
+**设计要点**
+
+* bootup() 是插件唯一接触 UI 框架的入口
+* 插件只**注册 Tool Window**
+* 插件不决定 Tool Window 的位置、显示时机
+
+**4. 插件对外提供的能力（API）**
+
+添加便签
+
+```python
+def add(self, note: str) -> str:
+    id = str(uuid.uuid4())
+    self._view.add(id, note)
+    self._notes[id] = note
+    self.noteAdded.emit(id)
+    return id
+```
+
+删除便签
+
+```python
+def remove(self, id: str):
+    self._notes.pop(id)
+    self._view.remove(id)
+    self.noteRemoved.emit(id)
+```
+
+查询便签
+
+```python
+def currentId(self) -> str | None:
+    return self._view.currentId()
+
+```
+
+API 设计原则体现
+
+* 参数都是基础类型
+* 返回值是可测试的
+* 不暴露 UI 对象
+* UI 更新是插件内部实现细节
+
+**3. Signal：插件的事件接口**
+
+```python
+noteAdded = Signal(str)
+noteRemoved = Signal(str)
+```
+
+Signal 的语义
+* 表示 **“状态已经发生变化”**
+* 不携带行为
+* 不要求调用方存在 UI
+
+例如:
+```python
+xside.notes.noteAdded.connect(...)
+```
+
+**4. 插件中的 Tool Window**
+```python
+class NotesView(QWidget):
+    def __init__(self):
+        super().__init__()
+        self._list = QListWidget()
+        self.setLayout(QVBox(self._list))
+            
+    def add(self, id: str, note: str):
+        item = QListWidgetItem(note)
+        item.setData(Qt.ItemDataRole.UserRole, id)
+        self._list.addItem(item)
+    
+    def currentId(self) -> str | None:
+        item = self._list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+```
+
+设计说明:
+* Tool Window 是插件的内部视图
+* Host App 永远不直接操作 View
+* View 只负责展示，不包含业务逻辑
+
+**5. 插件的注册与安装**
+在 `setup.py` 中，通过 entry point 注册插件：
+
+```python
+entry_points={
+    "xSide": [
+        "xSide-Tutorial-Notes = x_notes.plugin:Notes",
+    ]
+}
+```
+
+* 插件是**可独立安装的**Python 包
+* Host App 无需显式 import 插件类
+* xSide 在启动时自动发现并加载
+
+
+**6. Host App：Hello Notes**
+
+Host App 不继承 QPlugin，它只是：
+> 一个使用服务的普通应用对象
+> 
+**1. 设置窗口标题**
+```python
+def setupWindowTitle(self):
+    xside.window.setMainWindowTitle('Hello Notes')
+```
+
+**2. 通过 Action 操作插件**
+```python
+
+self.addNoteAction = QAction(
+    '+',
+    tip='Add note',
+    triggered=self.onAddNoteActionTriggered,
+    id='add-note'
+)
+```
+
+```python
+xside.window.registerAction(self.addNoteAction)
+xside.window.addToolBarAction('top-tool-bar', 'add-note')
+```
+
+关键点:
+* Action 是 Host App 的责任
+* 插件不定义 Action
+* Action 通过 ID 参与布局
+
+**3. 显示 Notes Tool Window**
+```python
+xside.window.addToolWindow(
+    title="Notes",
+    icon="text",
+    id="notes-view",
+    area=xside.window.ToolWindowArea.Right
+)
+
+xside.window.showToolWindow("notes-view")
+```
+
+说明:
+* Host App 决定 是否显示
+* 插件只负责 注册
+* Tool Window 的位置是布局层面的决定
+
+**4. 调用插件能力**
+
+```python
+def onAddNoteActionTriggered(self):
+    def then(text, ok):
+        if ok:
+            xside.notes.add(text)
+
+    xside.window.showTextInputBox("Take note", then=then)
+```
+
+```python
+def onRemoveNoteActionTriggered(self):
+    id = xside.notes.currentId()
+    xside.notes.remove(id) if id is not None else ...
+```
+
+体现的分工:
+* UI 流程 → Host App
+* 数据操作 → Notes 插件
+* 状态存储 → 插件内部
+
+**5. 小结**
+
+Notes 插件是一个标准的 xSide 服务型插件：
+* 可被多个应用复用
+* 可独立演进
+* UI 是插件的附属物，而非核心
